@@ -18,14 +18,18 @@ def im2col_manual_jax(x, KH, KW, S, P, out_h, out_w):
     # x: (N, C, H, W)
     N, C, H, W = x.shape
 
-    # Pad input
+    # pad input
     x_pad = jnp.pad(x, ((0,0),(0,0),(P,P),(P,P)))
 
-    # TO DO: Convert input (x) into shape (N, out_h*out_w, C*KH*KW). 
-    # Refer to Lecture 3 for implementing this operation.
-    
-    # patches = ...
-    # return patches
+    # the identical pytorch code had its loops unrolled and generated a huge JIT graph, so an alternative is implemented here
+    # broadcast spatial indices to (out_h, out_w, KH, KW)
+    rows = jnp.arange(out_h)[:, None] * S + jnp.arange(KH)[None, :]
+    cols = jnp.arange(out_w)[:, None] * S + jnp.arange(KW)[None, :]
+    # use spatial indices to index x_pad for patches
+    patches = x_pad[:, :, rows[:, None, :, None], cols[None, :, None, :]]
+
+    # (N, C, out_h, out_w, KH, KW) -> (N, out_h*out_w, C*KH*KW).
+    return patches.transpose(0, 2, 3, 1, 4, 5).reshape(N, out_h*out_w, C*KH*KW)
 
 def conv2d_manual_jax(x, weight, bias, stride=1, padding=1):
     '''
@@ -36,22 +40,20 @@ def conv2d_manual_jax(x, weight, bias, stride=1, padding=1):
     N, C, H, W = x.shape
     C_out, _, KH, KW = weight.shape
 
-    # define your helper variables here
-    # out_h = ...
-    # out_w = ...
+    out_h = ((H + 2*padding - KH) // stride) + 1
+    out_w = ((W + 2*padding - KW) // stride) + 1
     
-    # TO DO: 1) convert input (x) into shape (N, out_h*out_w, C*KH*KW).
-    # cols = im2col_manual_jax(x, KH, KW, stride, padding, out_h, out_w)
+    # Convert input into shape (N, out_h*out_w, C*KH*KW).
+    cols = im2col_manual_jax(x, KH, KW, stride, padding, out_h, out_w)
 
-    # TO DO: 2) flatten self.weight into shape (C_out, C*KH*KW).
+    # Flatten weights into shape (C_out, C*KH*KW).
+    weights = weight.reshape(C_out, C*KH*KW)
 
-    # TO DO: 3) perform tiled matmul after required reshaping is done.
+    # Perform matmul and add bias.
+    result = cols @ weights.T + bias
 
-    # TO DO: 4) Add bias.
-
-    # TO DO: 5) reshape output into shape (N, C_out, out_h, out_w).
-
-    #return out
+    # Reshape output into shape (N, C_out, out_h, out_w).
+    return result.transpose(0, 2, 1).reshape(N, C_out, out_h, out_w)
 
 if __name__ == "__main__":
     # Instantiate PyTorch model
@@ -74,7 +76,7 @@ if __name__ == "__main__":
     bias_jax = jnp.array(params["bias"])
 
     # enable JIT compilation
-    conv2d_manual_jax_jit = jit(conv2d_manual_jax)
+    conv2d_manual_jax_jit = jit(conv2d_manual_jax, static_argnames=("stride", "padding"))
 
     # call your JAX function
     out_jax = conv2d_manual_jax_jit(x_jax, weight_jax, bias_jax)

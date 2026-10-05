@@ -21,6 +21,8 @@ class ConvModel(nn.Module):
         # Precompute output size
         # self.out_h = ...
         # self.out_w = ...
+        self.out_h = ((H + 2*padding - kernel_size) // stride) + 1
+        self.out_w = ((W + 2*padding - kernel_size) // stride) + 1
 
         self.weight = nn.Parameter(torch.randn(out_channels, in_channels, kernel_size, kernel_size))
         self.bias = nn.Parameter(torch.zeros(out_channels))
@@ -41,29 +43,50 @@ class ConvModel(nn.Module):
 
         # TO DO: Convert input (x) into shape (N, out_h*out_w, C*KH*KW). 
         # Refer to Lecture 3 for implementing this operation.
-        
-        # patches = ...
-        # return patches
+
+        # this is the original implementation, but inductor took too long on large cases.
+        #patches = torch.empty(N, out_h, out_w, C, KH, KW, dtype=x.dtype, device=x.device)
+        #for h in range(out_h):
+        #    for w in range(out_w):
+        #        h_start = h * S
+        #        w_start = w * S
+        #        patches[:, h, w, :, :, :] = x_pad[:, :, h_start : h_start + KH, w_start : w_start + KW]
+        #out = patches.reshape(N, out_h*out_w, C*KH*KW)
+
+        # replaced it with a version that uses similar logic to JAX
+        # via row/column broadcasting
+        # this version will actually compile in a few seconds with inductor!
+        # i hate inductor its actually the worst
+        offsets = torch.arange(KH, device=x.device)
+        rows = torch.arange(out_h, device=x.device)[:, None] * S + offsets
+        cols = torch.arange(out_w, device=x.device)[:, None] * S + offsets
+        patches = x_pad[:, :, rows[:, None, :, None], cols[None, :, None, :]]
+        # (N, C, out_h, out_w, KH, KW) -> (N, out_h*out_w, C*KH*KW).
+        out = patches.permute(0, 2, 3, 1, 4, 5).reshape(N, out_h*out_w, C*KH*KW)
+        return out
 
     def conv2d_manual(self, x):
         N = x.shape[0]
         C_out = self.out_channels
+        C = self.in_channels
         KH = KW = self.kernel_size
 
         # TO DO: 1) convert input (x) into shape (N, out_h*out_w, C*KH*KW).
-        # cols = self.im2col_manual(x)          
-
+        cols = self.im2col_manual(x)          
+        
         # TO DO: 2) flatten self.weight into shape (C_out, C*KH*KW).
+        weights = self.weight.reshape(C_out, C*KH*KW)
 
         # TO DO: 3) perform tiled matmul after required reshaping is done.
-
+        # don't know why you would implement this manually, just use @ and BLAS
         # TO DO: 4) Add bias.
+        result = cols @ weights.t() + self.bias
 
         # TO DO: 5) reshape output into shape (N, C_out, out_h, out_w).
+        # result is (N, out_h*out_w, C_out)
+        out = result.permute(0, 2, 1).reshape(N, C_out, self.out_h, self.out_w)
 
-
-
-        #return out
+        return out
 
     def forward(self, x):
         return self.conv2d_manual(x)
